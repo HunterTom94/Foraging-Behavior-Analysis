@@ -13,6 +13,46 @@ def angle_between(v1, v2):
     v2_u = unit_vector(v2)
     return np.arccos(np.clip(np.dot(v1_u, v2_u), -1.0, 1.0))
 
+def signed_angle_between(v1,v2):
+    # v1 start vector
+    # v2 end vector
+    # returns the change of angle from v1 to v2, clockwise is positive direction.
+    angle = angle_between(v1, v2)
+
+    theta_1 = math.atan2(v1[1], v1[0])
+    theta_2 = math.atan2(v2[1], v2[0])
+    if theta_2 > theta_1:
+        return 180*-angle/np.pi
+    else:
+        if theta_1 - theta_2 > np.pi:
+            return 180*-angle/np.pi
+        else:
+            return 180*angle/np.pi
+
+# def signed_angle_between(v1,v2):
+#     # v1 start vector
+#     # v2 end vector
+#     # returns the change of angle from v1 to v2, clockwise is positive direction.
+#     theta_1 = math.atan2(v1[1], v1[0])
+#     theta_2 = math.atan2(v2[1], v2[0])
+#     print(theta_1)
+#     print(theta_2)
+#
+#     clk = theta_1 - theta_2
+#     counterclk = clk - np.pi * 2
+#
+#     print('clk')
+#     print(clk)
+#     print('counterclk')
+#     print(counterclk)
+#
+#     if np.abs(clk)<=np.abs(counterclk):
+#
+#         return 180*clk/np.pi
+#     else:
+#
+#         return 180 * counterclk / np.pi
+
 def points2line(pt1, pt2):
     line = np.empty((0, 2), int)
     coordinate = np.reshape(np.asarray(pt1), (1, 2))

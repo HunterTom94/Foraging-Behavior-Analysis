@@ -5,7 +5,7 @@ from scipy import optimize, stats
 import os
 import itertools
 import math
-from geometry import angle_between
+from geometry import signed_angle_between
 from opencv_drawing import LinkPoints
 from matplotlib import cm
 from time import time
@@ -92,11 +92,11 @@ def circle_fit_selection(trajectory):
 def trajectory2pts(trajectory):
     trajectory.iloc[:, 0:2] = trajectory.iloc[:, 0:2].astype(float).round(0).astype(int)
 
-    coord_x = np.asarray(trajectory.iloc[:, 0] + 35).astype(int)
-    coord_y = np.asarray(trajectory.iloc[:, 1] + 35).astype(int)
+    coord_x = np.asarray(trajectory.iloc[:, 0] + 35)
+    coord_y = np.asarray(trajectory.iloc[:, 1] + 35)
     pts = np.stack((coord_x, coord_y), axis=1)
     big_pts = pts * scale
-    return big_pts
+    return big_pts.astype(int)
 
 
 def line_generator(trajectory, pts, trajectory_name):
@@ -105,6 +105,7 @@ def line_generator(trajectory, pts, trajectory_name):
     yc, xc, R, _, _ = circle_fit(pts)
 
     lines = line_template
+    skip_angle = 0
     for ind, (pt1, pt2) in enumerate(pairwise(pts)):
         length = math.hypot(pt1[0] - pt2[0], pt1[1] - pt2[1])
         if ind == 0:
@@ -117,12 +118,14 @@ def line_generator(trajectory, pts, trajectory_name):
                 last_line -= 1
                 if last_line < 0:
                     angle = np.nan
+                    skip_angle = 1
                     break
-                angle = angle_between(pt2 - pt1, lines.loc[last_line, 'point2'] - lines.loc[last_line, 'point1'])
+            if not skip_angle:
+                angle = signed_angle_between(pt2 - pt1, lines.loc[last_line, 'point2'] - lines.loc[last_line, 'point1'])
 
-        dist = math.hypot(pt1[0] - yc, pt1[1] - xc)
+        dist = math.hypot(pt1[0] - xc, pt1[1] - yc)
         if dist >= (R - edge_size * scale):
-            if math.hypot(pt2[0] - yc, pt2[1] - xc) >= (R - edge_size * scale):
+            if math.hypot(pt2[0] - xc, pt2[1] - yc) >= (R - edge_size * scale):
                 on_edge = 1
             else:
                 on_edge = 0
@@ -136,14 +139,23 @@ def line_generator(trajectory, pts, trajectory_name):
         # else:
         #     on_edge = 0
         lines = lines.append(
-            {'line_ID': ind, 'point1': pt1, 'point2': pt2, 'angle': angle, 'length': length,
+            {'line_ID': ind, 'point1': pt1, 'point2': pt2, 'angle': np.round(angle, 1), 'length': length,
              'speed': length / diff_time[ind], 'distance': dist, 'time': diff_time[ind],
              'start_time': trajectory.iloc[ind, 2], 'on_edge': on_edge, 'trajectory_name': trajectory_name},
             ignore_index=True)
+        lines['delta_distance'] = np.insert(np.diff(lines['distance'].values), 0, np.nan)
     return lines
 
 
 def draw_trajectory(lines):
+    # def frame_bar_callback(*args):
+    #     global frame_index
+    #     frame_index = args[0]
+    #     pad = pad_copy.copy()
+    #     cv2.circle(pad, (lines.loc[frame_index, 'point1'][0], lines.loc[frame_index, 'point1'][1]), 3, (255, 255, 255),
+    #                -1, cv2.LINE_AA)
+    #     cv2.imshow('draw_pad', pad)
+    #     print(frame_index)
     pad = np.zeros((70 * scale, 70 * scale), dtype=np.uint8)
     pad = cv2.cvtColor(pad, cv2.COLOR_GRAY2BGR)
     color_ls = []
@@ -152,30 +164,45 @@ def draw_trajectory(lines):
     color_ls = np.flip(np.asarray(color_ls), axis=1) * 255
 
     # 'angle', 'length', 'speed', 'distance', 'time', 'start_time'
-    data_to_plot = lines['angle']
-    inds = np.digitize(data_to_plot.values / (data_to_plot.max() / 255), np.arange(256)) - 1
+
+    data_to_plot = 'delta_distance'
+    inds = np.digitize(lines[data_to_plot].values / (lines[data_to_plot].max() / 255), np.arange(256)) - 1
 
     for index, (_, row) in enumerate(lines.iterrows()):
         LinkPoints(pad, row['point1'], row['point2'], BGR=tuple(color_ls[inds[index]].tolist()))
 
     pad_copy = pad.copy()
     frame_index = 0
+    cv2.namedWindow('draw_pad')
+    # cv2.createTrackbar('Frame', 'draw_pad', frame_index, lines.shape[0]-1, frame_bar_callback)
 
     while True:
-        pad = pad_copy
+        pad = pad_copy.copy()
 
-        cv2.circle(pad,(lines.loc[frame_index,'point1'][1],lines.loc[frame_index,'point1'][0]), 3, (255,255,255),-1,cv2.LINE_AA)
-        cv2.imshow('test', pad)
+        cv2.circle(pad, (lines.loc[frame_index, 'point1'][0], lines.loc[frame_index, 'point1'][1]), 3, (255, 255, 255),
+                   -1, cv2.LINE_AA)
+        cv2.putText(pad, 'TimeStamp: {}'.format(np.round(lines.loc[frame_index, 'start_time']), 1), (400, 680),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 200, 0))
+        cv2.putText(pad, 'Angle: {}'.format(np.round(lines.loc[frame_index, 'angle'], 1)),
+                    (10, 680),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 200, 0))
+        cv2.putText(pad, '{}: {}'.format(data_to_plot, np.round(lines.loc[frame_index, data_to_plot], 1)),
+                    (10, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 200, 0))
+        cv2.imshow('draw_pad', pad)
         input = cv2.waitKeyEx(-1)
-        if input == 2424832: # Left Arrow Key
+
+        if input == 2424832:  # Left Arrow Key
             frame_index -= 1
             if frame_index < 0:
                 frame_index = 0
-        elif input == 2555904: # Right Arrow Key
+        elif input == 2555904:  # Right Arrow Key
             frame_index += 1
-            if frame_index > lines.shape[0]:
-                frame_index = lines.shape[0]
-        print(frame_index)
+            if frame_index >= lines.shape[0]:
+                frame_index = lines.shape[0] - 1
+        elif input == 27:  # Esc Key
+            cv2.destroyAllWindows()
+            break
 
 
 sample = pd.read_pickle('selected_trajectories\\60hr_7.pkl')
@@ -187,23 +214,24 @@ lines = lines[lines['on_edge'] == 0]
 lines = lines.reset_index(drop=True)
 draw_trajectory(lines)
 exit()
-pad = np.zeros((70 * scale, 70 * scale), dtype=np.uint8)
-pad = cv2.cvtColor(pad, cv2.COLOR_GRAY2BGR)
-cv2.polylines(pad, [pts], color=(255, 255, 255), isClosed=False, thickness=1, lineType=cv2.LINE_AA)
-yc, xc, R, residu, area = circle_fit(pts)
-cv2.circle(pad, (np.round(xc, 0).astype(int), np.round(yc, 0).astype(int)),
-           int(3), color=(0, 255, 0), thickness=-1, lineType=cv2.LINE_AA)
-cv2.circle(pad, (np.round(xc, 0).astype(int), np.round(yc, 0).astype(int)),
-           np.round((R - edge_size * scale), 0).astype(int), color=(0, 0, 255), thickness=1, lineType=cv2.LINE_AA)
-cv2.circle(pad, (np.round(xc, 0).astype(int), np.round(yc, 0).astype(int)),
-           np.round(R, 0).astype(int), color=(255, 0, 0), thickness=1, lineType=cv2.LINE_AA)
+# pad = np.zeros((70 * scale, 70 * scale), dtype=np.uint8)
+# pad = cv2.cvtColor(pad, cv2.COLOR_GRAY2BGR)
+# cv2.polylines(pad, [pts], color=(255, 255, 255), isClosed=False, thickness=1, lineType=cv2.LINE_AA)
+# yc, xc, R, residu, area = circle_fit(pts)
 # cv2.circle(pad, (np.round(xc, 0).astype(int), np.round(yc, 0).astype(int)),
-#            np.round((R + edge_size * scale), 0).astype(int), color=(0, 0, 255), thickness=1, lineType=cv2.LINE_AA)
+#            int(3), color=(0, 255, 0), thickness=-1, lineType=cv2.LINE_AA)
+# cv2.circle(pad, (np.round(xc, 0).astype(int), np.round(yc, 0).astype(int)),
+#            np.round((R - edge_size * scale), 0).astype(int), color=(0, 0, 255), thickness=1, lineType=cv2.LINE_AA)
+# cv2.circle(pad, (np.round(xc, 0).astype(int), np.round(yc, 0).astype(int)),
+#            np.round(R, 0).astype(int), color=(255, 0, 0), thickness=1, lineType=cv2.LINE_AA)
+#
+# cv2.imshow('test1', pad)
+# cv2.waitKey(-1)
+#
+# exit()
 
-cv2.imshow('test1', pad)
-cv2.waitKey(-1)
+# *********************************************************************************************************************
 
-exit()
 
 # directory = os.fsencode('trajectories')
 #
@@ -215,26 +243,63 @@ exit()
 #              sample.to_pickle('selected_trajectories\\{}'.format(filename))
 
 
-# lines = pd.read_pickle('60hr_lines.pkl')
-sample = pd.read_pickle('selected_trajectories\\60hr_7.pkl')
-pts = trajectory2pts(sample)
-lines = line_generator(sample, pts, '60hr_7')
-lines = lines[pd.notnull(lines['angle'])]
-lines = lines[pd.notnull(lines['distance'])]
+# *********************************************************************************************************************
+
+def sns_scatter_plt(x_name,y_name):
+    sns.scatterplot(lines[x_name].values, lines[y_name].values)
+    plt.title(lines.loc[0,'trajectory_name'].split('_')[0])
+    plt.xlabel(x_name)
+    plt.ylabel(y_name)
+
+lines = pd.read_pickle('12hr_lines.pkl')
+# sample = pd.read_pickle('selected_trajectories\\60hr_7.pkl')
+# pts = trajectory2pts(sample)
+# lines = line_generator(sample, pts, '60hr_7')
+
+# lines = lines[pd.notnull(lines['angle'])]
+# lines = lines[pd.notnull(lines['distance'])]
+lines = lines[lines['start_time'] < 5]
 lines = lines[lines['on_edge'] == 0]
+# lines = lines[lines['time'] == 0.5]
+lines = lines.reset_index(drop=True)
 
-angle = lines['angle'].values
-distance = lines['distance'].values
+sns_scatter_plt('angle','delta_distance')
+# sns_scatter_plt('speed','distance')
 
-sns.scatterplot(angle, distance)
 # sns.set_style('darkgrid')
 # sns.distplot(data)
 # sns.distplot(data, fit=stats.laplace, kde=False)
 plt.show()
 exit()
 
+# *********************************************************************************************************************
+names = ['Fed','12hr','24hr','48hr','60hr','72hr']
+box_data = []
+
+for name in names:
+    lines = pd.read_pickle('{}_lines.pkl'.format(name))
+
+    lines = lines[pd.notnull(lines['angle'])]
+    # lines = lines[pd.notnull(lines['distance'])]
+    lines = lines[lines['on_edge'] == 0]
+    lines = lines[lines['time'] == 0.5]
+    lines = lines.reset_index(drop=True)
+
+    temp_boxdata = []
+    for trajectory_name in lines['trajectory_name'].unique():
+        trajectory_lines = lines[lines['trajectory_name'] == trajectory_name]
+        temp_boxdata.append(trajectory_lines[trajectory_lines['angle']>=30].shape[0]/trajectory_lines.shape[0])
+
+    box_data.append(temp_boxdata)
+
+sns.boxplot(data=box_data)
+plt.show()
+exit()
+
+
+# *********************************************************************************************************************
 start_time = time()
-condition = '60hr'
+condition = 'Fed'
 count = 0
 total_lines = line_template
 
@@ -252,3 +317,5 @@ for file in os.listdir(directory):
         print(int(time() - start_time))
 
 total_lines.to_pickle('{}_lines.pkl'.format(condition))
+
+# *********************************************************************************************************************
