@@ -12,6 +12,7 @@ from time import time
 from data_management import condition_filter
 from joblib import Parallel, delayed
 import multiprocessing
+from numbers import Number
 
 def gaussian(x, mu, sig):
     return np.exp(-np.power(x - mu, 2.) / (2 * np.power(sig, 2.)))
@@ -109,20 +110,35 @@ def line_generator(trajectory, pts, trajectory_name):
         # Calculate turn angle
         if ind == 0:
             angle = np.nan
+            bearing = np.nan
+            turn_rate = np.nan
+            turn_speed = np.nan
         elif length == 0:
             angle = np.nan
+            bearing = np.nan
+            turn_rate = np.nan
+            turn_speed = np.nan
         else:
             last_line = ind - 1
             while lines.loc[last_line, 'length'] == 0:
                 last_line -= 1
                 if last_line < 0:
                     angle = np.nan
+                    bearing = np.nan
+                    turn_rate = np.nan
+                    turn_speed = np.nan
                     skip_angle = 1
                     break
             if not skip_angle:
                 # angle = signed_angle_between(pt2 - pt1, lines.loc[last_line, 'point2'] - lines.loc[last_line, 'point1'])
                 # Negative Sign on y coordinate to be in Accordance with draw trajectory (x-y axis swap)
                 angle = signed_angle_between((lines.loc[last_line, 'point2'] - lines.loc[last_line, 'point1']) * np.array([1,-1]), (pt2 - pt1) * np.array([1,-1]))
+                # Calculate Bearing
+                # Negative Sign on y coordinate to be in Accordance with draw trajectory (x-y axis swap)
+                bearing = signed_angle_between((lines.loc[last_line, 'point2'] - lines.loc[last_line, 'point1']) * np.array([1, -1]),
+                                               (np.array([xc, yc]) - pt1) * np.array([1, -1]))
+                turn_rate = angle / lines.loc[last_line, 'length']
+                turn_speed = angle / lines.loc[last_line, 'time']
         # Calculate Distance
         dist = math.hypot(pt1[0] - xc, pt1[1] - yc)
         # Calculate on Edge
@@ -133,9 +149,7 @@ def line_generator(trajectory, pts, trajectory_name):
                 on_edge = 0
         else:
             on_edge = 0
-        # Calculate Bearing
-        # Negative Sign on y coordinate to be in Accordance with draw trajectory (x-y axis swap)
-        bearing = signed_angle_between((pt2 - pt1) * np.array([1,-1]), (np.array([xc, yc]) - pt1) * np.array([1,-1]))
+
         # Calculating concentration
         conc_s0p5 = gauss_conc(dist, 0.5)[0]
         conc_s1 = gauss_conc(dist, 1)[0]
@@ -144,14 +158,17 @@ def line_generator(trajectory, pts, trajectory_name):
 
         lines = lines.append(
             {'line_ID': ind, 'point1': pt1, 'point2': pt2, 'angle': np.round(angle, 1),
-             'turn_rate': np.round(angle / dist, 3),
-             'turn_speed': np.round(angle / diff_time[ind], 1), 'length': np.round(length, 1),
+             'turn_rate': np.round(turn_rate, 3),
+             'turn_speed': np.round(turn_speed, 1), 'length': np.round(length, 1),
              'speed': np.round(length / diff_time[ind], 1), 'distance': dist,
              'time': diff_time[ind], 'start_time': trajectory.iloc[ind, 2], 'on_edge': on_edge,
              'condition': trajectory_name.split('_')[0], 'trajectory_index': int(trajectory_name.split('_')[1]),
              'bearing': np.round(bearing, 1), 'conc_s0p5': conc_s0p5, 'conc_s1': conc_s1, 'conc_s2': conc_s2,
              'conc_s3': conc_s3},
             ignore_index=True)
+    lines['x_center'] = xc
+    lines['y_center'] = yc
+    lines['radius'] = R
     lines['delta_distance'] = np.round(np.insert(np.diff(lines['distance'].values), 0, np.nan), 1)
     lines['d_dist_rate'] = np.insert(np.round((np.diff(lines['distance'].values) / lines['time'].values[:-1]).astype('float64'),5), 0, np.nan)
     lines['d_conc_s0p5'] = np.insert(np.round((np.diff(lines['conc_s0p5'].values) / lines['time'].values[:-1]).astype('float64'),5), 0, np.nan)
@@ -223,7 +240,9 @@ def draw_trajectory(lines):
             break
 
 def draw_single_trajectory(lines):
-    text_pad = np.zeros((70 * scale, 70 * scale), dtype=np.uint8)
+    text_pad = np.zeros((70 * scale, 40 * scale), dtype=np.uint8)
+    text_pad = cv2.cvtColor(text_pad, cv2.COLOR_GRAY2BGR)
+    empty_text = text_pad.copy()
     pad = np.zeros((70 * scale, 70 * scale), dtype=np.uint8)
     pad = cv2.cvtColor(pad, cv2.COLOR_GRAY2BGR)
     empty_pad = pad.copy()
@@ -236,14 +255,13 @@ def draw_single_trajectory(lines):
 
     data_to_plot = 'speed'
 
-
     frame_index = 0
     trajectory_index = -1
 
     cv2.namedWindow('draw_pad')
-    cv2.moveWindow("draw_pad", 20, 20)
+    cv2.moveWindow("draw_pad", 320, 200)
     cv2.namedWindow("text_board")
-    cv2.moveWindow("text_board", 520, 1020)
+    cv2.moveWindow("text_board", 1020, 200)
 
     while True:
         curr_trajectory_index = lines.loc[frame_index, 'trajectory_index']
@@ -257,7 +275,7 @@ def draw_single_trajectory(lines):
 
             overlay = pad.copy()
 
-            cv2.circle(overlay, (int(pad.shape[0] / 2), int(pad.shape[1] / 2)), 45, (255, 255, 255),
+            cv2.circle(overlay, (int(single_trajectory.iloc[0].loc['x_center']), int(single_trajectory.iloc[0].loc['y_center'])), 45, (255, 255, 255),
                        -1, cv2.LINE_AA)
 
             alpha = 0.6
@@ -267,20 +285,25 @@ def draw_single_trajectory(lines):
             pad_copy = pad.copy()
 
         pad = pad_copy.copy()
-
+        text_pad = empty_text.copy()
+        cv2.polylines(pad, [np.array([[int(single_trajectory.iloc[0].loc['x_center']), int(single_trajectory.iloc[0].loc['y_center'])],
+                                      [lines.loc[frame_index, 'point1'][0], lines.loc[frame_index, 'point1'][1]]])],
+                      False, (255, 255, 255), thickness=1, lineType=cv2.LINE_AA)
         cv2.circle(pad, (lines.loc[frame_index, 'point1'][0], lines.loc[frame_index, 'point1'][1]), 3, (255, 255, 255),
                    -1, cv2.LINE_AA)
-        cv2.putText(pad, 'Distance: {}'.format(np.round(lines.loc[frame_index, 'distance']), 1), (400, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 200, 0))
-        cv2.putText(pad, 'TimeStamp: {}'.format(np.round(lines.loc[frame_index, 'start_time']), 1), (400, 680),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 200, 0))
-        cv2.putText(pad, 'Angle: {}'.format(np.round(lines.loc[frame_index, 'angle'], 1)),
-                    (10, 680),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 200, 0))
-        cv2.putText(pad, '{}: {}'.format(data_to_plot, np.round(lines.loc[frame_index, data_to_plot], 1)),
-                    (10, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 200, 0))
+        text_ls = ['distance', 'angle', 'bearing', 'speed', 'length', 'time', 'start_time', 'turn_rate', 'conc_s1',
+                   'd_conc_s1', 'condition', 'trajectory_index', 'point1', 'point2']
+        for text_ind, text in enumerate(text_ls):
+            content = lines.loc[frame_index, text]
+            if isinstance(content, Number) and text not in ['time', 'start_time', 'turn_rate', 'conc_s1', 'd_conc_s1',
+                                                            'point1', 'point2']:
+                cv2.putText(text_pad, '{}: {}'.format(text.title(), np.round(content), 1), (10, 30 + 50*text_ind),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 200, 0))
+            else:
+                cv2.putText(text_pad, '{}: {}'.format(text.title(), content), (10, 30 + 50 * text_ind),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 200, 0))
         cv2.imshow('draw_pad', pad)
+        cv2.imshow('text_board', text_pad)
         input = cv2.waitKeyEx(-1)
 
         if input == 2424832:  # Left Arrow Key
@@ -320,9 +343,9 @@ if __name__ == '__main__':
     # # lines = lines[pd.notnull(lines['distance'])]
     # lines = lines[lines['on_edge'] == 0]
     # lines = lines.reset_index(drop=True)
-    # with pd.option_context('display.max_rows', None, 'display.max_columns', None):
-    #     print(lines)
-    # # draw_trajectory(lines)
+    # # with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+    # #     print(lines)
+    # draw_single_trajectory(lines)
     # exit()
     # pad = np.zeros((70 * scale, 70 * scale), dtype=np.uint8)
     # pad = cv2.cvtColor(pad, cv2.COLOR_GRAY2BGR)
@@ -402,10 +425,10 @@ if __name__ == '__main__':
     # total_lines.to_pickle('all_selected_lines_bz2.pkl', compression='bz2')
 
     # ******************************************************************************************************************
-    a = pd.read_pickle('all_selected_lines.pkl')
-    with pd.option_context('display.max_rows', None, 'display.max_columns', None):
-        print(a)
-    exit()
+    # a = pd.read_pickle('all_selected_lines.pkl')
+    # with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+    #     print(a)
+    # exit()
     total_lines = line_template
     todo_ls = []
     directory = os.fsencode('selected_trajectories')
@@ -423,5 +446,4 @@ if __name__ == '__main__':
         todo_ls)
     for result in results:
         total_lines = total_lines.append(result, ignore_index=True)
-    # total_lines.to_pickle('all_selected_lines.pkl')
-    total_lines.to_pickle('all_selected_lines.bz2')
+    total_lines.to_pickle('all_selected_lines.pkl')

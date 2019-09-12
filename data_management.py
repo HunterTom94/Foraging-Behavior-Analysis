@@ -70,8 +70,9 @@ def just_before_found(found_before, time):
 
     return out_df
 
-def meta_update(meta, orthokinesis):
+def meta_update(meta, orthokinesis, sharp_turn):
     meta['orthokinesis'] = 0
+    meta['sharp_turn'] = 0
     meta['found'] = 'not_found'
     meta.at[~pd.isnull(meta['find_time']),'found'] = 'found'
     meta['startvation'] = 'no'
@@ -79,12 +80,12 @@ def meta_update(meta, orthokinesis):
     meta.at[meta['condition'].isin(['48hr', '60hr', '72hr']), 'startvation'] = 'long'
     for condition in np.unique(orthokinesis['condition']):
         for trajectory_index in np.unique(orthokinesis['trajectory_index']):
-            temp_ortho = orthokinesis[(orthokinesis['condition'] == condition) & (orthokinesis['trajectory_index'] == trajectory_index)]
+            temp_ortho = orthokinesis[
+                (orthokinesis['condition'] == condition) & (orthokinesis['trajectory_index'] == trajectory_index)]
+            temp_sharp_turn = sharp_turn[(sharp_turn['condition'] == condition) & (sharp_turn['trajectory_index'] == trajectory_index)]
             meta.at[(meta['condition'] == condition) & (meta['trajectory_index'] == trajectory_index), 'orthokinesis'] = temp_ortho.shape[0]
-    meta.to_pickle('metadata_v1.pkl')
-
-
-
+            meta.at[(meta['condition'] == condition) & (meta['trajectory_index'] == trajectory_index), 'sharp_turn'] = temp_sharp_turn.shape[0]
+    meta.to_pickle('metadata_v2.pkl')
 
 # *********************************************************************************************************************
 # CHECK METADATA MATCH DATA
