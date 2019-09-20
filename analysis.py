@@ -10,6 +10,14 @@ from scipy.stats import ttest_ind
 from joblib import Parallel, delayed
 import multiprocessing
 import math
+from scipy import stats
+from scipy.integrate import trapz
+from time import time
+from scipy.optimize import curve_fit
+from scipy.stats import norm
+
+data = pd.read_pickle('all_selected_lines.pkl')
+meta = pd.read_pickle('metadata.pkl')
 
 scale = 10
 slow_down_corrcoef_threshold = -0.7
@@ -268,10 +276,14 @@ def sharp_turn_screen(lines, duration):
                     lines['start_time'] <= bout_df.iloc[-1].loc['end_time'])]
             center = np.mean(corr_rows['point1'].values)
             dist = math.hypot(center[0] - corr_rows.iloc[0].loc['x_center'], center[1] - corr_rows.iloc[0].loc['y_center'])
+            if_found = int(np.isnan(meta[(meta['condition'] == condition) & (meta['trajectory_index'] == trajectory_index)]['find_time']))
+            found_ls = ['found', 'not_found']
+            turn_sum = int(np.nansum(corr_rows['angle'].values))
+            turn = (180 + turn_sum) % 360 - 180
             new_df = new_df.append(
                 {'condition': condition, 'trajectory_index': trajectory_index,
                  'start_time': corr_rows.iloc[0].loc['start_time'],
-                 'end_time': corr_rows.iloc[-1].loc['start_time'], 'distance': dist}, ignore_index=True)
+                 'end_time': corr_rows.iloc[-1].loc['start_time'], 'distance': dist, 'found': found_ls[if_found], 'angle_sum': turn_sum, 'angle': turn}, ignore_index=True)
 
         return new_df
 
@@ -289,6 +301,8 @@ def sharp_turn_screen(lines, duration):
                     continue
                 turn_sum = np.nansum(corr_rows['angle'].values)
                 length_sum = np.nansum(corr_rows['length'].values)
+                if length_sum < 2 * scale:
+                    continue
                 if np.abs(turn_sum) > angle_threshold and length_sum < length_threshold:
                     trajectory_df = trajectory_df.append(
                         {'condition': condition, 'trajectory_index': trajectory_index,
@@ -310,24 +324,215 @@ def sharp_turn_screen(lines, duration):
             out_df = out_df.append(result, ignore_index=True)
     return out_df
 
+def kde_gen(x):
+    def func(x, a, x0, sigma):
+        return a * np.exp(-(x - x0) ** 2 / (2 * sigma ** 2))
+
+    start_time = time()
+    below_zero = True
+    fit_range = 2
+    bandwidth = 1.06 * x.std() * x.size ** (-1 / 5.)
+    support = np.linspace(np.min(x), np.max(x), 1000)
+
+    kernels = []
+    count = 0
+    length = len(x)
+    for x_i in x:
+        print(count/length)
+        kernel = stats.norm(x_i, bandwidth).pdf(support)
+        kernels.append(kernel)
+        count += 1
+
+    density = np.sum(kernels, axis=0)
+    density /= trapz(density, support)
+    peak_index = np.argmax(density)
+
+    while below_zero:
+        peak_range_index = support[int(len(support) - (len(support)-peak_index)*fit_range) : (len(support) - 1)]
+        peak_range = density[int(len(support) - (len(support)-peak_index)*fit_range) : (len(support) - 1)]
+
+        popt, pcov = curve_fit(func, peak_range_index, peak_range, p0=[np.max(density), support[peak_index], 0.5])
+        pred = func(support, popt[0], popt[1], popt[2])
+
+        cleaned = density - pred
+
+        below_zero = np.any(cleaned[support < support[peak_index]] < 0)
+        fit_range -= 0.05
+        if fit_range < 1:
+            break
+
+    np.save('{}_distribution_no_tail.npy'.format(condition), np.stack((support,cleaned, density)))
+
+    plt.plot(support, pred, c='r')
+    plt.plot(support, density, c='k')
+    plt.plot(support, cleaned, c='b')
+
+    plt.xlabel('distance (millimeter * 10)')
+    plt.ylabel('density')
+    plt.title(condition)
+    plt.ylim([0, 0.02])
+    plt.xlim([0, 300])
+
+    plt.show()
+
+    # print()
+    # print(fit_range)
+    # print('time spent {}'.format(time()-start_time))
+
+def fit_head(kde, condition):
+    def func(x, a, x0, sigma):
+        return a * np.exp(-(x - x0) ** 2 / (2 * sigma ** 2))
+    support = kde[0, :]
+    cleaned = kde[1, :]
+    density = kde[2, :]
+    cleaned /= trapz(cleaned, support)
+
+    fit_range = 0
+    error = 0
+    error_threshold = 0.00001
+
+    while error < error_threshold:
+        fit_range += 1
+        peak_range_index = support[support < fit_range]
+        peak_range = cleaned[support < fit_range]
+
+        popt, pcov = curve_fit(func, peak_range_index, peak_range, p0=[np.max(peak_range), peak_range_index[-1], 0.5])
+        pred = func(support, popt[0], popt[1], popt[2])
+        error = np.abs(pred[support < fit_range] - peak_range).sum() / len(peak_range_index)
+
+    ax = plt.gca()
+    plt.plot(support, pred, c='r')
+    plt.plot(support, cleaned, c='b')
+
+    plt.text(0.05, 0.95, 'error < {}'.format(error_threshold), transform=ax.transAxes, fontsize=14,
+            verticalalignment='top')
+
+    # Plot Gaussian Height
+    x1= popt[1]
+    y, h, col = 0, popt[0], 'k'
+    plt.plot([x1, x1], [y, y + h], lw=1.5, c=col)
+    plt.text(x1 + 1, popt[0] * .5,  str(np.round(x1,1)), ha='left', va='center', color=col)
+
+    # Plot Std
+    x1, x2 = popt[1],popt[1] - popt[2]
+    y, h, col = popt[0] + 0.0002, 0.0002, 'k'
+    plt.plot([x1, x1, x2, x2], [y, y + h, y + h, y], lw=1.5, c=col)
+    plt.text((x1 + x2) * .5, y + h, str(np.round(popt[2],1)), ha='center', va='bottom', color=col)
 
 
+
+    plt.xlabel('distance (millimeter * 10)')
+    plt.ylabel('density')
+    plt.title(condition)
+    plt.ylim([0, 0.01])
+    plt.xlim([0, 300])
+    plt.savefig('new_data\\{}_head_fit_error_{}'.format(condition, error_threshold))
+    plt.show()
+
+def head_area(kde, area_till):
+    support = kde[0, :]
+    cleaned = kde[1, :]
+    density = kde[2, :]
+    cleaned /= trapz(cleaned, support)
+
+    till_index = np.argmin(np.abs(support - area_till))
+
+
+    # Plot Area
+    x1 = area_till
+    y, h, col = 0, cleaned[till_index], 'g'
+    plt.plot([x1, x1], [y, y + h], lw=1.5, c=col, linestyle='dashed')
+    plt.text(x1 - 1, cleaned[till_index] * .5, str(np.round(trapz(cleaned[:till_index], support[:till_index]), 3)), ha='right', va='center', color='k')
+    plt.plot(support, cleaned, c='b')
+
+    plt.xlabel('distance (millimeter * 10)')
+    plt.ylabel('density')
+    plt.title(condition)
+    plt.ylim([0, 0.01])
+    plt.xlim([0, 300])
+    plt.savefig('new_data\\{}_head_area_till_{}'.format(condition, area_till))
+    plt.show()
 
 if __name__ == '__main__':
-    found_before = pd.read_pickle('selected_found_before.pkl')
-    found = pd.read_pickle('selected_found.pkl')
-    not_found = pd.read_pickle('selected_not_found.pkl')
-    data = pd.read_pickle('all_selected_lines.pkl')
-    meta = pd.read_pickle('metadata.pkl')
-    meta_v1 = pd.read_pickle('metadata_v1.pkl')
-    meta_v2 = pd.read_pickle('metadata_v2.pkl')
-    orthokinesis = pd.read_pickle('orthokinesis_dur_3_slow_-0.7_dis_0.4.pkl')
-    conc_orthokinesis = pd.read_pickle('orthokinesis_dur_3_slow_-0.7_dis_0.4_conc_conc_s3.pkl')
-    potential_weathervane = pd.read_pickle('weathervane_dur_3_bear_-0.4.pkl')
-    potential_curve = pd.read_pickle('curve_dur_3.pkl')
-    sharp_turn = pd.read_pickle('sharp_turn_dur_1.5_angle_90.pkl')
+    # found_before = pd.read_pickle('selected_found_before.pkl')  # Includes not found
+    # found_after = pd.read_pickle('selected_found_after.pkl')
+    # found = pd.read_pickle('selected_found.pkl')
+    # not_found = pd.read_pickle('selected_not_found.pkl')
+    # meta_v1 = pd.read_pickle('metadata_v1.pkl')
+    # meta_v2 = pd.read_pickle('metadata_v2.pkl')
+    # meta_v2 = meta_v2[meta_v2['selected'] == 1]
+    # orthokinesis = pd.read_pickle('orthokinesis_dur_3_slow_-0.7_dis_0.4.pkl')
+    # conc_orthokinesis = pd.read_pickle('orthokinesis_dur_3_slow_-0.7_dis_0.4_conc_conc_s3.pkl')
+    # potential_weathervane = pd.read_pickle('weathervane_dur_3_bear_-0.4.pkl')
+    # potential_curve = pd.read_pickle('curve_dur_3.pkl')
+    # sharp_turn = pd.read_pickle('sharp_turn_dur_1.5_angle_90.pkl')
+    # noafter_sharp_turn = pd.read_pickle('noafter_sharp_turn_dur_1.5_angle_90.pkl')
+    # after_sharp_turn = pd.read_pickle('after_sharp_turn_dur_1.5_angle_90.pkl')
+    #
+    # test_72 = pd.read_pickle('all_lines_test_72hr.pkl')
 
-    # print(data.columns)
+    # all_lines = pd.read_pickle('all_lines.pkl')
+    # all_lines = all_lines[all_lines['radius'] < 305]
+    # all_lines = all_lines[all_lines['distance'] < 320]
+
+    # draw_single_trajectory(condition_filter(all_lines, '72hr'))
+    # exit()
+
+    # *********************************************************************************************************************
+    # all_groupby = all_lines.groupby(['condition', 'trajectory_index'])
+    # radius = all_groupby['radius'].mean().values
+    # g = sns.distplot(radius, kde=False, hist_kws=dict(edgecolor="w", linewidth=1), bins=5)
+    # g.set(xlabel='millimeter * 10', ylabel='count')
+    # plt.show()
+
+    # exit()
+    # *********************************************************************************************************************
+    for condition in conditions:
+        kde = np.load('{}_distribution_no_tail.npy'.format(condition))
+        # fit_head(kde, condition)
+        head_area(kde, 150)
+    exit()
+    # *********************************************************************************************************************
+    num_cores = multiprocessing.cpu_count()
+    results = Parallel(n_jobs=num_cores)(
+        delayed(kde_gen)(condition_filter(all_lines, condition)['distance'] for condition in conditions))
+
+    for condition in conditions:
+        condition_line = condition_filter(all_lines, condition)
+        kde_gen(condition_line['distance'])
+        # plt.ylim([0, 0.02])
+        # plt.xlim([0, 300])
+        #
+        # plt.show()
+        # exit()
+        # g = sns.distplot(condition_line['distance'], norm_hist=True)
+        # g.set(xlabel='distance (millimeter * 10)', ylabel='density', title=condition)
+        # plt.ylim([0, 0.02])
+        # plt.xlim([0, 325])
+        # # plt.legend(conditions)
+        # plt.show()
+        # g = sns.distplot(condition_line['distance'], hist=False, rug=True, rug_kws={'alpha': 0})
+        # # g = sns.distplot(condition_line['distance'], kde=False, hist_kws=dict(edgecolor="w", linewidth=1), norm_hist=True)
+        # g.set(xlabel='distance (millimeter * 10)', ylabel='density', title=condition)
+        # plt.ylim([0, 0.02])
+        # plt.xlim([0, 325])
+    # plt.legend(conditions)
+    #     plt.show()
+    exit()
+
+    # *********************************************************************************************************************
+
+    #
+    # # print(np.sort(test_72['radius'].unique()).astype(int))
+    # #
+    # draw_single_trajectory(condition_filter(all_lines, '72hr'))
+    # exit()
+
+    # with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+    #     print(meta)
+    # exit()
+    # with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+    #     print(condition_filter(found_before,'Fed')['trajectory_index'].unique())
     # exit()
 
     # before_time = 3
@@ -337,14 +542,27 @@ if __name__ == '__main__':
     # lines = lines[lines['on_edge'] == 0]
     # lines = lines.reset_index(drop=True)
     # *********************************************************************************************************************
-    # potential_sharp_turn = sharp_turn_screen(data, sharp_turn_duration)
-    # potential_sharp_turn.to_pickle('sharp_turn_dur_{}_angle_{}.pkl'.format(sharp_turn_duration, angle_threshold))
+    potential_sharp_turn = sharp_turn_screen(data, sharp_turn_duration)
+    potential_sharp_turn.to_pickle('sharp_turn_dur_{}_angle_{}.pkl'.format(sharp_turn_duration, angle_threshold))
     # with pd.option_context('display.max_rows', None, 'display.max_columns', None):
     #     print(potential_sharp_turn)
-    # draw_single_trajectory(screen2lines(data, condition_filter(potential_sharp_turn, 'Fed')))
+
+    # with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+    #     print(meta)
+    exit()
+    # meta_v2 = condition_filter(meta_v2, '72hr')
+    # print(meta_v2.shape[0])
+    # print(meta_v2[meta_v2['found'] == 'found'].shape[0])
+    # print(meta_v2[meta_v2['found'] == 'not_found'].shape[0])
+    # # # draw_single_trajectory(screen2lines(data, condition_filter(orthokinesis, 'Fed')))
+    # draw_single_trajectory(screen2lines(data, condition_filter(sharp_turn, 'Fed')))
     # exit()
     # *********************************************************************************************************************
-
+    # potential_sharp_turn = sharp_turn_screen(found_before, sharp_turn_duration)
+    # potential_sharp_turn.to_pickle('noafter_sharp_turn_dur_{}_angle_{}.pkl'.format(sharp_turn_duration, angle_threshold))
+    # with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+    #     print(potential_sharp_turn)
+    # exit()
     # *********************************************************************************************************************
     # potential_weathervane = weathervane_screen(data, 3)
     # # potential_curve = curve_screen(data, 3)
@@ -369,35 +587,85 @@ if __name__ == '__main__':
     # draw_single_trajectory(screen2lines(data, condition_filter(conc_orthokinesis, 'Fed')))
     # exit()
     # *********************************************************************************************************************
-
+    # print(np.sort(sharp_turn['angle'].unique()))
+    # with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+    #     print(sharp_turn[sharp_turn['distance'] >300])
+    # exit()
     # *********************************************************************************************************************
 
     # g = sns.jointplot(x="speed", y="distance", data=lines, kind="kde", xlim=(0, 200), ylim=(0, 300))
     # # g = sns.jointplot(x="angle", y="delta_distance", data=lines, kind="kde", xlim=(-180, 180), ylim=(-100, 100))
-    # # g = sns.jointplot(x="angle", y="distance", data=lines, kind="kde", xlim=(-180, 180), ylim=(0, 300))
+    # g = sns.jointplot(x="angle", y="distance", data=meta_v2, kind="kde", xlim=(-180, 180), ylim=(0, 300))
+    # meta_v2 = meta_v2[(meta_v2['orthokinesis'] != 0) & (meta_v2['sharp_turn'] != 0)]
+    #
+    # corrcoef = pearsonr(meta_v2['orthokinesis'].values, meta_v2['sharp_turn'].values)
+    # print(corrcoef)
+    # g = sns.jointplot(x="orthokinesis", y="sharp_turn", data=meta_v2)
+
+    # g = (sns.jointplot(x="angle", y="distance", data=sharp_turn, color="k", xlim=(-180, 180), ylim=(0, 300)).plot_joint(sns.kdeplot, zorder=0, n_levels=6))
     #
     # g.fig.suptitle('{}_{}'.format(lines.loc[0, 'condition'], before_time))
+
+    # ***********************************Sharp Turn Distribution Plot********************************************************
+
+    g = sns.distplot(noafter_sharp_turn['distance'], kde=False, hist_kws=dict(edgecolor="w", linewidth=1))
+    g.set(ylabel='count')
+
+    # *********************************************************************************************************************
 
     # ********************************** Orthokinesis Graph Generator **********************************************
 
     # meta_update(meta,conc_orthokinesis)
     # exit()
     # with pd.option_context('display.max_rows', None, 'display.max_columns', None):
-    #     print(meta_v1)
+    #     print(meta_v2)
     # exit()
-    # p_value = np.round(ttest_ind(meta_v1[meta_v1['startvation'] == 'long']['orthokinesis'], meta_v1[meta_v1['startvation'] == 'short']['orthokinesis'])[1],100)
-    # print(p_value)
+
 
     # sns.set(style="ticks", palette="pastel")
-    # # sns.barplot(x="startvation", y="orthokinesis", hue="found", palette=["m", "g"], data=meta_v1, ci=68, capsize=.1)
-    # sns.barplot(x="condition", y="orthokinesis", data=meta_v1, ci=68, capsize=.1)
-    # # sns.barplot(x="startvation", y="orthokinesis", data=meta_v1, ci=68, capsize=.1)
+    # # sns.barplot(x="condition", y="orthokinesis", hue="found", palette=["m", "g"], data=meta_v2, ci=68, capsize=.1)
+    # sns.barplot(x="condition", y="orthokinesis", data=meta_v2, ci=68, capsize=.1)
+    # # # sns.barplot(x="startvation", y="orthokinesis", data=meta_v1, ci=68, capsize=.1)
     # sns.despine(offset=10, trim=True)
-
-    # x1, x2 = 1, 2
-    # y, h, col = 1.2 + 0.05, 0.05, 'k'
+    #
+    # # meta_v2 = meta_v2[meta_v2['condition'] == '72hr']
+    # p_value = np.round(ttest_ind(meta_v2[meta_v2['condition'] == '60hr']['orthokinesis'], meta_v2[meta_v2['condition'] == '72hr']['orthokinesis'])[1],10)
+    # print(p_value)
+    #
+    # # x1, x2 = -0.2, 0.2
+    # # y, h, col = 3.9 + 0.05, 0.05, 'k'
+    # # plt.plot([x1, x1, x2, x2], [y, y + h, y + h, y], lw=1.5, c=col)
+    # # plt.text((x1 + x2) * .5, y + h, "*", ha='center', va='bottom', color=col)
+    # # #
+    # x1, x2 = 4, 5
+    # y, h, col = 2.8 + 0.05, 0.05, 'k'
     # plt.plot([x1, x1, x2, x2], [y, y + h, y + h, y], lw=1.5, c=col)
-    # plt.text((x1 + x2) * .5, y + h, "***", ha='center', va='bottom', color=col)
+    # plt.text((x1 + x2) * .5, y + h, "ns", ha='center', va='bottom', color=col)
+    # # # #
+    # x1, x2 = 3,4
+    # y, h, col = 2.4 + 0.05, 0.05, 'k'
+    # plt.plot([x1, x1, x2, x2], [y, y + h, y + h, y], lw=1.5, c=col)
+    # plt.text((x1 + x2) * .5, y + h, "*", ha='center', va='bottom', color=col)
+    # #
+    # x1, x2 = 5,6
+    # y, h, col = 2.8 + 0.05, 0.05, 'k'
+    # plt.plot([x1, x1, x2, x2], [y, y + h, y + h, y], lw=1.5, c=col)
+    # plt.text((x1 + x2) * .5, y + h, "ns", ha='center', va='bottom', color=col)
+    #
+    # x1, x2 = 3.8,4.2
+    # y, h, col = 2.9 + 0.05, 0.05, 'k'
+    # plt.plot([x1, x1, x2, x2], [y, y + h, y + h, y], lw=1.5, c=col)
+    # plt.text((x1 + x2) * .5, y + h, "ns", ha='center', va='bottom', color=col)
+    #
+    # x1, x2 = 4.8,5.2
+    # y, h, col = 3.3 + 0.05, 0.05, 'k'
+    # plt.plot([x1, x1, x2, x2], [y, y + h, y + h, y], lw=1.5, c=col)
+    # plt.text((x1 + x2) * .5, y + h, "ns", ha='center', va='bottom', color=col)
+    #
+    # x1, x2 = 5.8,6.2
+    # y, h, col = 3.0 + 0.05, 0.05, 'k'
+    # plt.plot([x1, x1, x2, x2], [y, y + h, y + h, y], lw=1.5, c=col)
+    # plt.text((x1 + x2) * .5, y + h, "ns", ha='center', va='bottom', color=col)
 
 
     # ********************************** Sharp Turn Graph Generator **********************************************
@@ -407,19 +675,61 @@ if __name__ == '__main__':
     # with pd.option_context('display.max_rows', None, 'display.max_columns', None):
     #     print(meta_v2)
     # exit()
-    # p_value = np.round(ttest_ind(meta_v1[meta_v1['startvation'] == 'long']['orthokinesis'], meta_v1[meta_v1['startvation'] == 'short']['orthokinesis'])[1],100)
+
+    # p_value = np.round(ttest_ind(meta_v2[(meta_v2['startvation'] == 'long') & (meta_v2['found'] == 'found')]['sharp_turn'],
+    #                              meta_v2[(meta_v2['startvation'] == 'long') & (meta_v2['found'] == 'not_found')]['sharp_turn'])[1], 10)
     # print(p_value)
+    # exit()
 
-    sns.set(style="ticks", palette="pastel")
-    # sns.barplot(x="startvation", y="sharp_turn", hue="found", palette=["m", "g"], data=meta_v2, ci=68, capsize=.1)
-    # sns.barplot(x="condition", y="sharp_turn", data=meta_v2, ci=68, capsize=.1)
-    sns.barplot(x="startvation", y="sharp_turn", data=meta_v2, ci=68, capsize=.1)
-    sns.despine(offset=10, trim=True)
-
-    # x1, x2 = 1, 2
-    # y, h, col = 1.2 + 0.05, 0.05, 'k'
+    # sns.set(style="ticks", palette="pastel")
+    # g = sns.barplot(x="condition", y="sharp_turn", hue="found", palette=["m", "g"], data=meta_v2, ci=68, capsize=.1)
+    # # sns.barplot(x="angle", y="distance", data=sharp_turn, ci=68, capsize=.1)
+    # # sns.barplot(x="condition", y="sharp_turn", data=meta_v2, ci=68, capsize=.1)
+    # sns.despine(offset=10, trim=True)
+    #
+    # meta_v2 = meta_v2[meta_v2['condition'] == '72hr']
+    # p_value = np.round(ttest_ind(meta_v2[meta_v2['found'] == 'found']['sharp_turn'],
+    #                              meta_v2[meta_v2['found'] == 'not_found']['sharp_turn'])[1], 10)
+    # # p_value = np.round(ttest_ind(meta_v2[meta_v2['condition'] == '72hr']['sharp_turn'],
+    # #                              meta_v2[meta_v2['condition'] == '60hr']['sharp_turn'])[1], 10)
+    # print(p_value)
+    #
+    # # plt.legend(loc=(0.05,0.9))
+    #
+    # x1, x2 = -0.2, 0.2
+    # y, h, col = 8.1 + 0.05, 0.05, 'k'
     # plt.plot([x1, x1, x2, x2], [y, y + h, y + h, y], lw=1.5, c=col)
     # plt.text((x1 + x2) * .5, y + h, "***", ha='center', va='bottom', color=col)
+    # # # #
+    # x1, x2 = 0.8,1.2
+    # y, h, col = 5.1 + 0.05, 0.05, 'k'
+    # plt.plot([x1, x1, x2, x2], [y, y + h, y + h, y], lw=1.5, c=col)
+    # plt.text((x1 + x2) * .5, y + h, "***", ha='center', va='bottom', color=col)
+    # # # # #
+    # x1, x2 = 1.8,2.2
+    # y, h, col = 3.4 + 0.05, 0.05, 'k'
+    # plt.plot([x1, x1, x2, x2], [y, y + h, y + h, y], lw=1.5, c=col)
+    # plt.text((x1 + x2) * .5, y + h, "**", ha='center', va='bottom', color=col)
+    # # #
+    # x1, x2 = 2.8,3.2
+    # y, h, col = 6.8 + 0.05, 0.05, 'k'
+    # plt.plot([x1, x1, x2, x2], [y, y + h, y + h, y], lw=1.5, c=col)
+    # plt.text((x1 + x2) * .5, y + h, "***", ha='center', va='bottom', color=col)
+    # #
+    # x1, x2 = 3.8,4.2
+    # y, h, col = 4.7 + 0.05, 0.05, 'k'
+    # plt.plot([x1, x1, x2, x2], [y, y + h, y + h, y], lw=1.5, c=col)
+    # plt.text((x1 + x2) * .5, y + h, "***", ha='center', va='bottom', color=col)
+    # #
+    # x1, x2 = 4.8,5.2
+    # y, h, col = 4 + 0.05, 0.05, 'k'
+    # plt.plot([x1, x1, x2, x2], [y, y + h, y + h, y], lw=1.5, c=col)
+    # plt.text((x1 + x2) * .5, y + h, "***", ha='center', va='bottom', color=col)
+    # #
+    # x1, x2 = 5.8,6.2
+    # y, h, col = 6.0 + 0.05, 0.05, 'k'
+    # plt.plot([x1, x1, x2, x2], [y, y + h, y + h, y], lw=1.5, c=col)
+    # plt.text((x1 + x2) * .5, y + h, "ns", ha='center', va='bottom', color=col)
 
 
     # *********************************************************************************************************************

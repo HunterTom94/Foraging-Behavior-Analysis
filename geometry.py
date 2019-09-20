@@ -117,7 +117,7 @@ def in_area(im, points_polygon, test_points):
     # Draw it in src
     cv2.polylines(src, [points_polygon], True, (255), thickness=1, lineType=cv2.LINE_AA)
     # Get the contours
-    _, contours, _ = cv2.findContours(src, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(src, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     # Calculate the distances to the contour
     result = np.empty((test_points.shape[0], 1))
     for test_point_index in range(test_points.shape[0]):

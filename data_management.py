@@ -1,6 +1,9 @@
 import pandas as pd
 import numpy as np
 from time import time
+import os
+
+conditions = ['Fed','12hr','24hr','36hr','48hr','60hr','72hr']
 
 
 def meta_found_filter(df, bool):
@@ -20,12 +23,15 @@ def data_index_filter(df, index_ls):
 
 def before_found(data, meta):
     found = meta_found_filter(meta, 1)
+    data_after = pd.DataFrame()
     for _, row in found.iterrows():
         condition_data = condition_filter(data, row['condition'])
         temp_data = condition_data[condition_data['trajectory_index'] == row['trajectory_index']]
         data = data.drop(temp_data.loc[temp_data['start_time'] > row['find_time']].index)
+        data_after = data_after.append(temp_data.loc[temp_data['start_time'] > row['find_time']], ignore_index=True)
     data.sort_values(by=['condition', 'trajectory_index', 'line_ID']).reset_index(drop=True).to_pickle(
         'selected_found_before.pkl')
+    data_after.to_pickle('selected_found_after.pkl')
 
 
 def save_trajectory(data_name, sheet):
@@ -78,8 +84,8 @@ def meta_update(meta, orthokinesis, sharp_turn):
     meta['startvation'] = 'no'
     meta.at[meta['condition'].isin(['12hr','24hr','36hr']),'startvation'] = 'short'
     meta.at[meta['condition'].isin(['48hr', '60hr', '72hr']), 'startvation'] = 'long'
-    for condition in np.unique(orthokinesis['condition']):
-        for trajectory_index in np.unique(orthokinesis['trajectory_index']):
+    for condition in conditions:
+        for trajectory_index in np.unique(condition_filter(meta,condition)['trajectory_index']):
             temp_ortho = orthokinesis[
                 (orthokinesis['condition'] == condition) & (orthokinesis['trajectory_index'] == trajectory_index)]
             temp_sharp_turn = sharp_turn[(sharp_turn['condition'] == condition) & (sharp_turn['trajectory_index'] == trajectory_index)]
@@ -132,10 +138,17 @@ def extract_meta(data_name):
     for condition_ind in range(data.shape[1] // 3):
         temp_df = data.iloc[1:, condition_ind * 3:(condition_ind + 1) * 3].dropna(how='all')
         temp_df.columns = ['fly_name', 'find_time', 'first_50s_speed']
-        temp_df['condition'] = data.iloc[0, condition_ind * 3]
+        condition = data.iloc[0, condition_ind * 3]
+        temp_df['condition'] = condition
         temp_df = temp_df.reset_index(drop=True)
-        temp_df['trajectory_index'] = temp_df.index
+        trajectory_index = temp_df.index
+        temp_df['trajectory_index'] = trajectory_index
         concat_df = concat_df.append(temp_df, ignore_index=True)
+
+    concat_df['selected'] = np.nan
+    for condition in concat_df['condition'].unique():
+        for trajectory_index in condition_filter(concat_df, condition)['trajectory_index'].unique():
+            concat_df.at[(concat_df['condition'] == condition)&(concat_df['trajectory_index'] == trajectory_index), 'selected']= int(os.path.exists('selected_trajectories\\{}_{}.pkl'.format(condition, trajectory_index)))
 
     concat_df.to_pickle('metadata.pkl')
 
